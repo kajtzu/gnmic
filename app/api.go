@@ -36,7 +36,7 @@ func (a *App) newAPIServer() (*http.Server, error) {
 			a.Config.APIServer.TLS.KeyFile,
 			a.Config.APIServer.TLS.ClientAuth,
 			false, // skip-verify
-			true, // genSelfSigned
+			true,  // genSelfSigned
 		)
 		if err != nil {
 			return nil, err
@@ -279,6 +279,17 @@ func (a *App) handleClusteringGet(w http.ResponseWriter, r *http.Request) {
 		resp.Members[i].LockedTargets = instanceNodes[resp.Members[i].Name]
 	}
 	b, err := json.Marshal(resp)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(APIErrors{Errors: []string{err.Error()}})
+		return
+	}
+	w.Write(b)
+}
+
+func (a *App) handleHealthzGet(w http.ResponseWriter, r *http.Request) {
+	s := map[string]string{"status": "healthy",}
+	b, err := json.Marshal(s)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(APIErrors{Errors: []string{err.Error()}})
