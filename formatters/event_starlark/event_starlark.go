@@ -17,13 +17,14 @@ import (
 	"os"
 	"sync"
 
-	"github.com/openconfig/gnmic/formatters"
-	"github.com/openconfig/gnmic/types"
-	"github.com/openconfig/gnmic/utils"
 	"go.starlark.net/lib/math"
 	"go.starlark.net/lib/time"
 	"go.starlark.net/resolve"
 	"go.starlark.net/starlark"
+
+	"github.com/openconfig/gnmic/formatters"
+	"github.com/openconfig/gnmic/types"
+	"github.com/openconfig/gnmic/utils"
 )
 
 const (
@@ -149,7 +150,11 @@ func (p *starlarkProc) Apply(es ...*formatters.EventMsg) []*formatters.EventMsg 
 	}
 	r, err := starlark.Call(p.thread, p.applyFn, sevs, nil)
 	if err != nil {
-		p.logger.Printf("failed to run script: %v", err)
+		if p.Debug {
+			p.logger.Printf("failed to run script with input %v: %v", sevs, err)
+		} else {
+			p.logger.Printf("failed to run script: %v", err)
+		}
 		return es
 	}
 	if p.Debug {
@@ -194,6 +199,8 @@ func (p *starlarkProc) WithLogger(l *log.Logger) {
 func (p *starlarkProc) WithTargets(tcs map[string]*types.TargetConfig) {}
 
 func (p *starlarkProc) WithActions(act map[string]map[string]interface{}) {}
+
+func (p *starlarkProc) WithProcessors(procs map[string]map[string]any) {}
 
 func (p *starlarkProc) sourceProgram(builtins starlark.StringDict) (*starlark.Program, error) {
 	var src interface{}

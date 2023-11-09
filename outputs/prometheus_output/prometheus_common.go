@@ -18,9 +18,10 @@ import (
 	"time"
 
 	"github.com/openconfig/gnmi/proto/gnmi"
-	"github.com/openconfig/gnmic/formatters"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/prompb"
+
+	"github.com/openconfig/gnmic/formatters"
 )
 
 const (
@@ -134,6 +135,7 @@ type NamedTimeSeries struct {
 func (m *MetricBuilder) TimeSeriesFromEvent(ev *formatters.EventMsg) []*NamedTimeSeries {
 	promTS := make([]*NamedTimeSeries, 0, len(ev.Values))
 	tsLabels := m.GetLabels(ev)
+	timestamp := ev.Timestamp / int64(time.Millisecond)
 	for k, v := range ev.Values {
 		fv, err := toFloat(v)
 		if err != nil {
@@ -143,18 +145,21 @@ func (m *MetricBuilder) TimeSeriesFromEvent(ev *formatters.EventMsg) []*NamedTim
 			fv = 1.0
 		}
 		tsName := m.MetricName(ev.Name, k)
+		tsLabelsWithName := make([]prompb.Label, 0, len(tsLabels)+1)
+		tsLabelsWithName = append(tsLabelsWithName, tsLabels...)
+		tsLabelsWithName = append(tsLabelsWithName,
+			prompb.Label{
+				Name:  labels.MetricName,
+				Value: tsName,
+			})
 		nts := &NamedTimeSeries{
 			Name: tsName,
 			TS: &prompb.TimeSeries{
-				Labels: append(tsLabels,
-					prompb.Label{
-						Name:  labels.MetricName,
-						Value: m.MetricName(ev.Name, k),
-					}),
+				Labels: tsLabelsWithName,
 				Samples: []prompb.Sample{
 					{
 						Value:     fv,
-						Timestamp: ev.Timestamp / int64(time.Millisecond),
+						Timestamp: timestamp,
 					},
 				},
 			},

@@ -67,11 +67,13 @@ nav:
           - TCP: user_guide/outputs/tcp_output.md
           - UDP: user_guide/outputs/udp_output.md
           - SNMP: user_guide/outputs/snmp_output.md
+          - ASCII Graph: user_guide/outputs/asciigraph_output.md
           
       - Processors: 
           - Introduction: user_guide/event_processors/intro.md
           - Add Tag: user_guide/event_processors/event_add_tag.md
           - Allow: user_guide/event_processors/event_allow.md
+          - Combine: user_guide/event_processors/event_combine.md
           - Convert: user_guide/event_processors/event_convert.md
           - Data Convert: user_guide/event_processors/event_data_convert.md
           - Date string: user_guide/event_processors/event_date_string.md
