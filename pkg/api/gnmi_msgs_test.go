@@ -18,7 +18,7 @@ import (
 	"github.com/openconfig/gnmi/proto/gnmi"
 	"github.com/openconfig/gnmi/proto/gnmi_ext"
 
-	"github.com/openconfig/gnmic/pkg/testutils"
+	"github.com/openconfig/gnmic/pkg/api/testutils"
 )
 
 // Capabilities Request / Response tests
@@ -1377,6 +1377,17 @@ var valueTestSet = map[string]valueInput{
 			Val: &gnmi.TypedValue{
 				Value: &gnmi.TypedValue_JsonVal{
 					JsonVal: []byte("\"value\""),
+				},
+			},
+		},
+	},
+	"json_string_special_chars": {
+		data:     "<.*>",
+		encoding: "json",
+		msg: &gnmi.Update{
+			Val: &gnmi.TypedValue{
+				Value: &gnmi.TypedValue_JsonVal{
+					JsonVal: []byte("\"<.*>\""),
 				},
 			},
 		},
