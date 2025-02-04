@@ -15,8 +15,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
+	"sort"
 	"strings"
 
+	"github.com/AlekSi/pointer"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -24,6 +27,7 @@ import (
 
 	"github.com/openconfig/gnmic/pkg/api/types"
 	"github.com/openconfig/gnmic/pkg/api/utils"
+	"github.com/openconfig/gnmic/pkg/config"
 )
 
 func (a *App) newAPIServer() (*http.Server, error) {
@@ -49,6 +53,8 @@ func (a *App) newAPIServer() (*http.Server, error) {
 		a.reg.MustRegister(collectors.NewGoCollector())
 		a.reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 		a.reg.MustRegister(subscribeResponseReceivedCounter)
+		a.reg.MustRegister(subscribeResponseFailedCounter)
+		a.registerTargetMetrics()
 		go a.startClusterMetrics()
 	}
 	s := &http.Server{
@@ -76,7 +82,14 @@ func (a *App) handleConfigTargetsGet(w http.ResponseWriter, r *http.Request) {
 	a.configLock.RLock()
 	defer a.configLock.RUnlock()
 	if id == "" {
-		err = json.NewEncoder(w).Encode(a.Config.Targets)
+		// copy targets map
+		targets := make(map[string]*types.TargetConfig, len(a.Config.Targets))
+		for n, tc := range a.Config.Targets {
+			ntc := tc.DeepCopy()
+			ntc.Password = pointer.ToString("****")
+			targets[n] = ntc
+		}
+		err = json.NewEncoder(w).Encode(targets)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(APIErrors{Errors: []string{err.Error()}})
@@ -84,7 +97,9 @@ func (a *App) handleConfigTargetsGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if t, ok := a.Config.Targets[id]; ok {
-		err = json.NewEncoder(w).Encode(t)
+		tc := t.DeepCopy()
+		tc.Password = pointer.ToString("****")
+		err = json.NewEncoder(w).Encode(tc)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(APIErrors{Errors: []string{err.Error()}})
@@ -190,7 +205,28 @@ func (a *App) handleConfigProcessors(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
-	a.handlerCommonGet(w, a.Config)
+	nc := &config.Config{
+		GlobalFlags:   a.Config.GlobalFlags,
+		LocalFlags:    a.Config.LocalFlags,
+		FileConfig:    a.Config.FileConfig,
+		Targets:       make(map[string]*types.TargetConfig, len(a.Config.Targets)),
+		Subscriptions: a.Config.Subscriptions,
+		Outputs:       a.Config.Outputs,
+		Inputs:        a.Config.Inputs,
+		Processors:    a.Config.Processors,
+		Clustering:    a.Config.Clustering,
+		GnmiServer:    a.Config.GnmiServer,
+		APIServer:     a.Config.APIServer,
+		Loader:        a.Config.Loader,
+		Actions:       a.Config.Actions,
+		TunnelServer:  a.Config.TunnelServer,
+	}
+	for n, t := range a.Config.Targets {
+		tc := t.DeepCopy()
+		tc.Password = pointer.ToString("****")
+		nc.Targets[n] = tc
+	}
+	a.handlerCommonGet(w, nc)
 }
 
 func (a *App) handleTargetsGet(w http.ResponseWriter, r *http.Request) {
@@ -270,23 +306,14 @@ func (a *App) handleClusteringGet(w http.ResponseWriter, r *http.Request) {
 	resp := new(clusteringResponse)
 	resp.ClusterName = a.Config.ClusterName
 
-	leaderKey := fmt.Sprintf("gnmic/%s/leader", a.Config.ClusterName)
-	leader, err := a.locker.List(ctx, leaderKey)
+	var err error
+	resp.Leader, err = a.getLeaderName(ctx)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(APIErrors{Errors: []string{err.Error()}})
 		return
 	}
-	resp.Leader = leader[leaderKey]
-	lockedNodesPrefix := fmt.Sprintf("gnmic/%s/targets", a.Config.ClusterName)
 
-	lockedNodes, err := a.locker.List(a.ctx, lockedNodesPrefix)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(APIErrors{Errors: []string{err.Error()}})
-		return
-	}
-	resp.NumberOfLockedTargets = len(lockedNodes)
 	services, err := a.locker.GetServices(ctx, fmt.Sprintf("%s-gnmic-api", a.Config.ClusterName), nil)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -294,17 +321,26 @@ func (a *App) handleClusteringGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	instanceNodes := make(map[string][]string)
-	for k, v := range lockedNodes {
-		name := strings.TrimPrefix(k, fmt.Sprintf("gnmic/%s/targets/", a.Config.ClusterName))
-		if _, ok := instanceNodes[v]; !ok {
-			instanceNodes[v] = make([]string, 0)
-		}
-		instanceNodes[v] = append(instanceNodes[v], name)
+	instanceNodes, err := a.getInstanceToTargetsMapping(ctx)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(APIErrors{Errors: []string{err.Error()}})
+		return
 	}
+
+	for _, v := range instanceNodes {
+		resp.NumberOfLockedTargets += len(v)
+	}
+
 	resp.Members = make([]clusterMember, len(services))
 	for i, s := range services {
-		resp.Members[i].APIEndpoint = s.Address
+		scheme := "http://"
+		for _, t := range s.Tags {
+			if strings.HasPrefix(t, "protocol=") {
+				scheme = fmt.Sprintf("%s://", strings.TrimPrefix(t, "protocol="))
+			}
+		}
+		resp.Members[i].APIEndpoint = fmt.Sprintf("%s%s", scheme, s.Address)
 		resp.Members[i].Name = strings.TrimSuffix(s.ID, "-api")
 		resp.Members[i].IsLeader = resp.Leader == resp.Members[i].Name
 		resp.Members[i].NumberOfLockedTargets = len(instanceNodes[resp.Members[i].Name])
@@ -343,16 +379,7 @@ func (a *App) handleClusteringMembersGet(w http.ResponseWriter, r *http.Request)
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	// get leader
-	leaderKey := fmt.Sprintf("gnmic/%s/leader", a.Config.ClusterName)
-	leader, err := a.locker.List(ctx, leaderKey)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(APIErrors{Errors: []string{err.Error()}})
-		return
-	}
-	// get locked targets to instance mapping
-	lockedNodesPrefix := fmt.Sprintf("gnmic/%s/targets", a.Config.ClusterName)
-	lockedNodes, err := a.locker.List(a.ctx, lockedNodesPrefix)
+	leader, err := a.getLeaderName(ctx)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(APIErrors{Errors: []string{err.Error()}})
@@ -366,13 +393,11 @@ func (a *App) handleClusteringMembersGet(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	instanceNodes := make(map[string][]string)
-	for k, v := range lockedNodes {
-		name := strings.TrimPrefix(k, fmt.Sprintf("gnmic/%s/targets/", a.Config.ClusterName))
-		if _, ok := instanceNodes[v]; !ok {
-			instanceNodes[v] = make([]string, 0)
-		}
-		instanceNodes[v] = append(instanceNodes[v], name)
+	instanceNodes, err := a.getInstanceToTargetsMapping(ctx)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(APIErrors{Errors: []string{err.Error()}})
+		return
 	}
 	members := make([]clusterMember, len(services))
 	for i, s := range services {
@@ -384,7 +409,7 @@ func (a *App) handleClusteringMembersGet(w http.ResponseWriter, r *http.Request)
 		}
 		members[i].APIEndpoint = fmt.Sprintf("%s%s", scheme, s.Address)
 		members[i].Name = strings.TrimSuffix(s.ID, "-api")
-		members[i].IsLeader = leader[leaderKey] == members[i].Name
+		members[i].IsLeader = leader == members[i].Name
 		members[i].NumberOfLockedTargets = len(instanceNodes[members[i].Name])
 		members[i].LockedTargets = instanceNodes[members[i].Name]
 	}
@@ -405,16 +430,7 @@ func (a *App) handleClusteringLeaderGet(w http.ResponseWriter, r *http.Request) 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	// get leader
-	leaderKey := fmt.Sprintf("gnmic/%s/leader", a.Config.ClusterName)
-	leader, err := a.locker.List(ctx, leaderKey)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(APIErrors{Errors: []string{err.Error()}})
-		return
-	}
-	// get locked targets to instance mapping
-	lockedNodesPrefix := fmt.Sprintf("gnmic/%s/targets", a.Config.ClusterName)
-	lockedNodes, err := a.locker.List(a.ctx, lockedNodesPrefix)
+	leader, err := a.getLeaderName(ctx)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(APIErrors{Errors: []string{err.Error()}})
@@ -428,17 +444,16 @@ func (a *App) handleClusteringLeaderGet(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	instanceNodes := make(map[string][]string)
-	for k, v := range lockedNodes {
-		name := strings.TrimPrefix(k, fmt.Sprintf("gnmic/%s/targets/", a.Config.ClusterName))
-		if _, ok := instanceNodes[v]; !ok {
-			instanceNodes[v] = make([]string, 0)
-		}
-		instanceNodes[v] = append(instanceNodes[v], name)
+	instanceNodes, err := a.getInstanceToTargetsMapping(ctx)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(APIErrors{Errors: []string{err.Error()}})
+		return
 	}
+
 	members := make([]clusterMember, 1)
 	for _, s := range services {
-		if strings.TrimSuffix(s.ID, "-api") != leader[leaderKey] {
+		if strings.TrimSuffix(s.ID, "-api") != leader {
 			continue
 		}
 		scheme := "http://"
@@ -464,6 +479,108 @@ func (a *App) handleClusteringLeaderGet(w http.ResponseWriter, r *http.Request) 
 	w.Write(b)
 }
 
+func (a *App) handleClusteringLeaderDelete(w http.ResponseWriter, r *http.Request) {
+	if a.Config.Clustering == nil {
+		return
+	}
+
+	if !a.isLeader {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(APIErrors{Errors: []string{"not leader"}})
+		return
+	}
+
+	err := a.locker.Unlock(r.Context(), a.leaderKey())
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(APIErrors{Errors: []string{err.Error()}})
+		return
+	}
+}
+
+func (a *App) handleClusteringDrainInstance(w http.ResponseWriter, r *http.Request) {
+	if a.Config.Clustering == nil {
+		return
+	}
+
+	if !a.isLeader {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(APIErrors{Errors: []string{"not leader"}})
+		return
+	}
+
+	vars := mux.Vars(r)
+	id := vars["id"]
+	if id == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	ctx := r.Context()
+	services, err := a.locker.GetServices(ctx, fmt.Sprintf("%s-gnmic-api", a.Config.ClusterName),
+		[]string{
+			fmt.Sprintf("instance-name=%s", id),
+		})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(APIErrors{Errors: []string{err.Error()}})
+		return
+	}
+	if len(services) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(APIErrors{Errors: []string{"unknown instance: " + id}})
+		return
+	}
+	targets, err := a.getInstanceTargets(ctx, id)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(APIErrors{Errors: []string{err.Error()}})
+		return
+	}
+
+	go func() {
+		a.dispatchLock.Lock()
+		defer a.dispatchLock.Unlock()
+
+		for _, t := range targets {
+			err = a.unassignTarget(a.ctx, t, services[0].ID)
+			if err != nil {
+				a.Logger.Printf("failed to unassign target %s: %v", t, err)
+				continue
+			}
+			tc, ok := a.Config.Targets[t]
+			if !ok {
+				a.Logger.Printf("could not find target %s config", t)
+				continue
+			}
+			err = a.dispatchTarget(a.ctx, tc, id+"-api")
+			if err != nil {
+				a.Logger.Printf("failed to dispatch target %s: %v", t, err)
+				continue
+			}
+		}
+	}()
+}
+
+func (a *App) handleClusterRebalance(w http.ResponseWriter, r *http.Request) {
+	if a.Config.Clustering == nil {
+		return
+	}
+
+	if !a.isLeader {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(APIErrors{Errors: []string{"not leader"}})
+		return
+	}
+
+	go func() {
+		err := a.clusterRebalanceTargets()
+		if err != nil {
+			a.Logger.Printf("failed to rebalance: %v", err)
+		}
+	}()
+}
+
+// helpers
 func headersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Content-Type", "application/json")
@@ -472,8 +589,10 @@ func headersMiddleware(next http.Handler) http.Handler {
 }
 
 func (a *App) loggingMiddleware(next http.Handler) http.Handler {
-	next = handlers.LoggingHandler(a.Logger.Writer(), next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if (!a.Config.APIServer.HealthzDisableLogging && r.URL.Path == "/api/v1/healthz") || r.URL.Path != "/api/v1/healthz" {
+			next = handlers.LoggingHandler(a.Logger.Writer(), next)
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -488,4 +607,31 @@ func (a *App) handlerCommonGet(w http.ResponseWriter, i interface{}) {
 		return
 	}
 	w.Write(b)
+}
+
+func (a *App) getLeaderName(ctx context.Context) (string, error) {
+	leaderKey := fmt.Sprintf("gnmic/%s/leader", a.Config.ClusterName)
+	leader, err := a.locker.List(ctx, leaderKey)
+	if err != nil {
+		return "", nil
+	}
+	return leader[leaderKey], nil
+}
+
+func (a *App) getInstanceTargets(ctx context.Context, instance string) ([]string, error) {
+	locks, err := a.locker.List(ctx, fmt.Sprintf("gnmic/%s/targets", a.Config.Clustering.ClusterName))
+	if err != nil {
+		return nil, err
+	}
+	if a.Config.Debug {
+		a.Logger.Println("current locks:", locks)
+	}
+	targets := make([]string, 0)
+	for k, v := range locks {
+		if v == instance {
+			targets = append(targets, filepath.Base(k))
+		}
+	}
+	sort.Strings(targets)
+	return targets, nil
 }

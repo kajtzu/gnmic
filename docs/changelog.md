@@ -1,5 +1,60 @@
 ## Changelog
 
+### v0.40.0 - January 27th 2025
+
+- Processors:
+
+    - Introducing `event-value-tag-v2` processor, enabling the addition of values as tags to other messages
+      without requiring caching to be enabled in the associated output.
+  
+- Logging related to calls to the `/api/v1/healthz` API endpoint is now optional.
+
+- Clustering:
+  
+    - New REST API endpoints added:
+      - Switch the cluster leader: `DELETE /api/v1/cluster/leader`
+      - Drain an instance: `POST /api/v1/members/{id}/drain` where id is the instance name to be drained
+      - Rebalance the load between instances: `POST /api/v1/cluster/rebalance`
+
+### v0.39.0 - November 7th 2024
+
+- Get Command
+
+    - Added `--dry-run` flag.
+
+- Set Command
+
+    - Added `--no-trim` flag to disable trimming white spaces from values payload.
+
+- REST API
+
+    - Added `/api/v1/admin/shutdown` endpoint to shutdown gNMIc.
+
+- Outputs:
+
+    - File: file output now supports file rotation.
+
+    - NATS and Jetstream: The publishers buffer size is now configurable.
+
+- Build:
+
+    - Added `ARM64` binary and container image.
+
+- gNMIc Metrics:
+
+    - Added a metric to keep track of failed subscribe requests.
+
+    - Added a metric to keep track of targets connectivity state.
+
+- Clustering:
+
+    - The REST API client used for building gNMIc cluster can now be configured with client certificates to support mTLS.
+
+- Processors:
+
+    - Added a processor to handle converting binary IEEE float32 values to float32.
+
+
 ### v0.38.0 - July 8th 2024
 
 - Kafka Output

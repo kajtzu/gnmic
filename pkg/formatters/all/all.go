@@ -20,6 +20,7 @@ import (
 	_ "github.com/openconfig/gnmic/pkg/formatters/event_duration_convert"
 	_ "github.com/openconfig/gnmic/pkg/formatters/event_extract_tags"
 	_ "github.com/openconfig/gnmic/pkg/formatters/event_group_by"
+	_ "github.com/openconfig/gnmic/pkg/formatters/event_ieeefloat32"
 	_ "github.com/openconfig/gnmic/pkg/formatters/event_jq"
 	_ "github.com/openconfig/gnmic/pkg/formatters/event_merge"
 	_ "github.com/openconfig/gnmic/pkg/formatters/event_override_ts"
@@ -29,5 +30,6 @@ import (
 	_ "github.com/openconfig/gnmic/pkg/formatters/event_to_tag"
 	_ "github.com/openconfig/gnmic/pkg/formatters/event_trigger"
 	_ "github.com/openconfig/gnmic/pkg/formatters/event_value_tag"
+	_ "github.com/openconfig/gnmic/pkg/formatters/event_value_tag_v2"
 	_ "github.com/openconfig/gnmic/pkg/formatters/event_write"
 )

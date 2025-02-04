@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -76,11 +77,13 @@ type App struct {
 	targetsLockFn map[string]context.CancelFunc
 	rootDesc      desc.Descriptor
 	// end collector
-	router *mux.Router
-	locker lockers.Locker
+	router           *mux.Router
+	locker           lockers.Locker
+	clusteringClient *http.Client
 	// api
-	apiServices map[string]*lockers.Service
-	isLeader    bool
+	apiServices  map[string]*lockers.Service
+	isLeader     bool
+	dispatchLock *sync.Mutex
 	// prometheus registry
 	reg *prometheus.Registry
 	//
@@ -129,8 +132,10 @@ func New() *App {
 		activeTargets: make(map[string]struct{}),
 		targetsLockFn: make(map[string]context.CancelFunc),
 		//
-		router:        mux.NewRouter(),
-		apiServices:   make(map[string]*lockers.Service),
+		router:       mux.NewRouter(),
+		apiServices:  make(map[string]*lockers.Service),
+		dispatchLock: new(sync.Mutex),
+
 		Logger:        log.New(io.Discard, "[gnmic] ", log.LstdFlags|log.Lmsgprefix),
 		out:           os.Stdout,
 		PromptHistory: make([]string, 0, 128),
@@ -402,7 +407,7 @@ func (a *App) loadTargets(e fsnotify.Event) {
 			return
 		}
 		// in cluster && leader
-		dist, err := a.getTargetToInstanceMapping()
+		dist, err := a.getTargetToInstanceMapping(a.ctx)
 		if err != nil {
 			a.Logger.Printf("failed to get target to instance mapping: %v", err)
 			return
