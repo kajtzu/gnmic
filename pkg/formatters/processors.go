@@ -15,7 +15,6 @@ import (
 
 	"github.com/itchyny/gojq"
 	"github.com/mitchellh/mapstructure"
-
 	"github.com/openconfig/gnmic/pkg/api/types"
 )
 
@@ -24,27 +23,28 @@ var EventProcessors = map[string]Initializer{}
 var EventProcessorTypes = []string{
 	"event-add-tag",
 	"event-allow",
+	"event-combine",
 	"event-convert",
+	"event-data-convert",
 	"event-date-string",
 	"event-delete",
 	"event-drop",
+	"event-duration-convert",
 	"event-extract-tags",
+	"event-group-by",
+	"event-ieeefloat32",
 	"event-jq",
 	"event-merge",
 	"event-override-ts",
 	"event-rate-limit",
+	"event-starlark",
 	"event-strings",
+	"event-time-epoch",
 	"event-to-tag",
 	"event-trigger",
-	"event-write",
-	"event-group-by",
-	"event-data-convert",
 	"event-value-tag",
 	"event-value-tag-v2",
-	"event-starlark",
-	"event-combine",
-	"event-ieeefloat32",
-	"event-time-epoch",
+	"event-write",
 }
 
 type Initializer func() EventProcessor
@@ -54,6 +54,7 @@ func Register(name string, initFn Initializer) {
 }
 
 type Option func(EventProcessor)
+
 type EventProcessor interface {
 	Init(interface{}, ...Option) error
 	Apply(...*EventMsg) []*EventMsg
@@ -171,4 +172,29 @@ func MakeEventProcessors(
 		return nil, fmt.Errorf("%q event processor not found", epName)
 	}
 	return evps, nil
+}
+
+type BaseProcessor struct {
+	logger *log.Logger
+}
+
+func (p *BaseProcessor) WithLogger(l *log.Logger) {
+	p.logger = l
+}
+
+func (p *BaseProcessor) Init(interface{}, ...Option) error {
+	return nil
+}
+
+func (p *BaseProcessor) Apply(...*EventMsg) []*EventMsg {
+	return nil
+}
+
+func (p *BaseProcessor) WithTargets(map[string]*types.TargetConfig) {
+}
+
+func (p *BaseProcessor) WithActions(act map[string]map[string]interface{}) {
+}
+
+func (p *BaseProcessor) WithProcessors(procs map[string]map[string]any) {
 }

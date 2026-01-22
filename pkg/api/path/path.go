@@ -179,6 +179,11 @@ func parseXPathKeys(s string) (map[string]string, error) {
 			}
 			kvs[escapedBracketsReplacer.Replace(k)] = escapedBracketsReplacer.Replace(v)
 			inKey = false
+
+		default:
+			if !inKey {
+				return nil, errMalformedXPathKey
+			}
 		}
 		prevRune = r
 	}
@@ -201,7 +206,7 @@ func GnmiPathToXPath(p *gnmi.Path, noKeys bool) string {
 	sb := &strings.Builder{}
 	if p.Origin != "" {
 		sb.WriteString(p.Origin)
-		sb.WriteString(":")
+		sb.WriteString(":/")
 	}
 	elems := p.GetElem()
 	numElems := len(elems)

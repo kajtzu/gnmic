@@ -96,6 +96,7 @@ type createStreamConfig struct {
 	Description string        `mapstructure:"description,omitempty" json:"description,omitempty"`
 	Subjects    []string      `mapstructure:"subjects,omitempty" json:"subjects,omitempty"`
 	Storage     string        `mapstructure:"storage,omitempty" json:"storage,omitempty"`
+	Retention   string        `mapstructure:"retention-policy,omitempty" json:"retention-policy,omitempty"`
 	MaxMsgs     int64         `mapstructure:"max-msgs,omitempty" json:"max-msgs,omitempty"`
 	MaxBytes    int64         `mapstructure:"max-bytes,omitempty" json:"max-bytes,omitempty"`
 	MaxAge      time.Duration `mapstructure:"max-age,omitempty" json:"max-age,omitempty"`
@@ -104,14 +105,16 @@ type createStreamConfig struct {
 
 // jetstreamOutput //
 type jetstreamOutput struct {
+	outputs.BaseOutput
 	Cfg      *config
 	ctx      context.Context
 	cancelFn context.CancelFunc
 	msgChan  chan *outputs.ProtoMsg
 	wg       *sync.WaitGroup
 	logger   *log.Logger
-	mo       *formatters.MarshalOptions
-	evps     []formatters.EventProcessor
+
+	mo   *formatters.MarshalOptions
+	evps []formatters.EventProcessor
 
 	targetTpl *template.Template
 	msgTpl    *template.Template
@@ -129,16 +132,34 @@ func (n *jetstreamOutput) Init(ctx context.Context, name string, cfg map[string]
 	}
 	n.logger.SetPrefix(fmt.Sprintf(loggingPrefix, n.Cfg.Name))
 
+	options := &outputs.OutputOptions{}
 	for _, opt := range opts {
-		if err := opt(n); err != nil {
+		if err := opt(options); err != nil {
 			return err
 		}
 	}
+
+	// set defaults
 	err = n.setDefaults()
 	if err != nil {
 		return err
 	}
+
+	// apply logger
+	if options.Logger != nil && n.logger != nil {
+		n.logger.SetOutput(options.Logger.Writer())
+		n.logger.SetFlags(options.Logger.Flags())
+	}
+
+	// initialize registry
+	n.reg = options.Registry
 	err = n.registerMetrics()
+	if err != nil {
+		return err
+	}
+
+	// initialize event processors
+	err = n.setEventProcessors(options.EventProcessors, n.logger, options.TargetsConfig, options.Actions)
 	if err != nil {
 		return err
 	}
@@ -185,6 +206,7 @@ func (n *jetstreamOutput) setDefaults() error {
 	if n.Cfg.Stream == "" {
 		return errors.New("missing stream name")
 	}
+
 	if n.Cfg.Format == "" {
 		n.Cfg.Format = defaultFormat
 	}
@@ -228,6 +250,14 @@ func (n *jetstreamOutput) setDefaults() error {
 		if n.Cfg.CreateStream.Storage == "" {
 			n.Cfg.CreateStream.Storage = "memory"
 		}
+		if n.Cfg.CreateStream.Retention == "" {
+			n.Cfg.CreateStream.Retention = "limits"
+		}
+		// Validate retention policy value
+		if !isValidRetentionPolicy(n.Cfg.CreateStream.Retention) {
+			return fmt.Errorf("invalid retention-policy: %s (must be 'limits' or 'workqueue')",
+				n.Cfg.CreateStream.Retention)
+		}
 		return nil
 	}
 	return nil
@@ -263,13 +293,6 @@ func (n *jetstreamOutput) Close() error {
 	return nil
 }
 
-func (n *jetstreamOutput) RegisterMetrics(reg *prometheus.Registry) {
-	if !n.Cfg.EnableMetrics {
-		return
-	}
-	n.reg = reg
-}
-
 func (c *config) String() string {
 	b, err := json.Marshal(c)
 	if err != nil {
@@ -286,14 +309,7 @@ func (n *jetstreamOutput) String() string {
 	return string(b)
 }
 
-func (n *jetstreamOutput) SetLogger(logger *log.Logger) {
-	if logger != nil && n.logger != nil {
-		n.logger.SetOutput(logger.Writer())
-		n.logger.SetFlags(logger.Flags())
-	}
-}
-
-func (n *jetstreamOutput) SetEventProcessors(ps map[string]map[string]interface{},
+func (n *jetstreamOutput) setEventProcessors(ps map[string]map[string]interface{},
 	logger *log.Logger,
 	tcs map[string]*types.TargetConfig,
 	acts map[string]map[string]interface{}) error {
@@ -320,10 +336,6 @@ func (n *jetstreamOutput) SetName(name string) {
 	sb.WriteString(n.Cfg.Name)
 	n.Cfg.Name = sb.String()
 }
-
-func (n *jetstreamOutput) SetClusterName(string) {}
-
-func (n *jetstreamOutput) SetTargetsConfig(map[string]*types.TargetConfig) {}
 
 func (n *jetstreamOutput) worker(ctx context.Context, i int, cfg *config) {
 	defer n.wg.Done()
@@ -686,31 +698,64 @@ func sanitizeKey(k string) string {
 	return regSpace.ReplaceAllString(s, spaceReplChar)
 }
 
-var storageTypes = map[string]nats.StorageType{
-	"file":   nats.FileStorage,
-	"memory": nats.MemoryStorage,
+func storageType(s string) nats.StorageType {
+	switch strings.ToLower(s) {
+	case "file":
+		return nats.FileStorage
+	case "memory":
+		return nats.MemoryStorage
+	}
+	return nats.MemoryStorage
 }
 
+func isValidRetentionPolicy(policy string) bool {
+	switch strings.ToLower(policy) {
+	case "limits", "workqueue":
+		return true
+	}
+	return false
+}
+
+func retentionPolicy(s string) nats.RetentionPolicy {
+	switch strings.ToLower(s) {
+	case "workqueue":
+		return nats.WorkQueuePolicy
+	case "limits":
+		return nats.LimitsPolicy
+	}
+	return nats.LimitsPolicy
+}
+
+// var storageTypes = map[string]nats.StorageType{
+// 	"file":   nats.FileStorage,
+// 	"memory": nats.MemoryStorage,
+// }
+
 func (n *jetstreamOutput) createStream(js nats.JetStreamContext) error {
+	// If CreateStream is not configured, we're using an existing stream
 	if n.Cfg.CreateStream == nil {
 		return nil
 	}
+
 	stream, err := js.StreamInfo(n.Cfg.Stream)
 	if err != nil {
 		if !errors.Is(err, nats.ErrStreamNotFound) {
 			return err
 		}
 	}
-	// stream exists
+
+	// Stream exists, nothing to do
 	if stream != nil {
 		return nil
 	}
-	// create stream
+
+	// Create stream with configured retention policy
 	streamConfig := &nats.StreamConfig{
 		Name:        n.Cfg.Stream,
 		Description: n.Cfg.CreateStream.Description,
 		Subjects:    n.Cfg.CreateStream.Subjects,
-		Storage:     storageTypes[strings.ToLower(n.Cfg.CreateStream.Storage)],
+		Storage:     storageType(n.Cfg.CreateStream.Storage),
+		Retention:   retentionPolicy(n.Cfg.CreateStream.Retention),
 		MaxMsgs:     n.Cfg.CreateStream.MaxMsgs,
 		MaxBytes:    n.Cfg.CreateStream.MaxBytes,
 		MaxAge:      n.Cfg.CreateStream.MaxAge,

@@ -64,6 +64,7 @@ func (a *App) startGnmiServer() error {
 		TCPKeepalive:         a.Config.GnmiServer.TCPKeepalive,
 		Keepalive:            a.Config.GnmiServer.GRPCKeepalive.Convert(),
 		RateLimit:            a.Config.GnmiServer.RateLimit,
+		Timeout:              a.Config.GnmiServer.Timeout,
 		HealthEnabled:        true,
 		TLS:                  a.Config.GnmiServer.TLS,
 	}, server.WithLogger(a.Logger),
@@ -170,7 +171,7 @@ INITCONSUL:
 
 	err = consulClient.Agent().UpdateTTL(ttlCheckID, "", api.HealthPassing)
 	if err != nil {
-		a.Logger.Printf("failed to pass TTL check: %v", err)
+		a.Logger.Printf("failed to update TTL check to Passing: %v", err)
 	}
 	ticker := time.NewTicker(a.Config.GnmiServer.ServiceRegistration.CheckInterval / 2)
 	for {
@@ -178,10 +179,13 @@ INITCONSUL:
 		case <-ticker.C:
 			err = consulClient.Agent().UpdateTTL(ttlCheckID, "", api.HealthPassing)
 			if err != nil {
-				a.Logger.Printf("failed to pass TTL check: %v", err)
+				a.Logger.Printf("failed to update TTL check to Passing: %v", err)
 			}
 		case <-ctx.Done():
-			consulClient.Agent().UpdateTTL(ttlCheckID, ctx.Err().Error(), api.HealthCritical)
+			err = consulClient.Agent().UpdateTTL(ttlCheckID, ctx.Err().Error(), api.HealthCritical)
+			if err != nil {
+				a.Logger.Printf("failed to update TTL check to Critical: %v", err)
+			}
 			ticker.Stop()
 			goto INITCONSUL
 		}

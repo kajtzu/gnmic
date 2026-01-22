@@ -18,7 +18,6 @@ import (
 	"strings"
 
 	"github.com/mitchellh/mapstructure"
-
 	"github.com/openconfig/gnmic/pkg/api/types"
 )
 
@@ -133,6 +132,17 @@ func (c *Config) GetTargets() (map[string]*types.TargetConfig, error) {
 		c.logger.Printf("targets: %v", c.Targets)
 	}
 	return c.Targets, nil
+}
+
+func (c *Config) SetTargetConfigDefaultsExpandEnv(tc *types.TargetConfig) error {
+	er := c.SetTargetConfigDefaults(tc)
+	if er != nil {
+		return er
+	}
+	// we can also expand cert paths if needed
+	expandTargetEnv(tc)
+
+	return nil
 }
 
 func (c *Config) SetTargetConfigDefaults(tc *types.TargetConfig) error {

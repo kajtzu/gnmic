@@ -17,7 +17,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/openconfig/gnmic/pkg/api/types"
 	"github.com/openconfig/gnmic/pkg/api/utils"
 	"github.com/openconfig/gnmic/pkg/formatters"
 )
@@ -30,6 +29,7 @@ const (
 // groupBy groups values from different event messages in the same event message
 // based on tags values
 type groupBy struct {
+	formatters.BaseProcessor
 	Tags   []string `mapstructure:"tags,omitempty" json:"tags,omitempty"`
 	ByName bool     `mapstructure:"by-name,omitempty" json:"by-name,omitempty"`
 	Debug  bool     `mapstructure:"debug,omitempty" json:"debug,omitempty"`
@@ -105,12 +105,6 @@ func (p *groupBy) WithLogger(l *log.Logger) {
 	}
 }
 
-func (p *groupBy) WithTargets(tcs map[string]*types.TargetConfig) {}
-
-func (p *groupBy) WithActions(act map[string]map[string]interface{}) {}
-
-func (p *groupBy) WithProcessors(procs map[string]map[string]any) {}
-
 func (p *groupBy) byTagsOld(es []*formatters.EventMsg) []*formatters.EventMsg {
 	if len(p.Tags) == 0 {
 		return es
@@ -119,7 +113,7 @@ func (p *groupBy) byTagsOld(es []*formatters.EventMsg) []*formatters.EventMsg {
 	groups := make(map[string]*formatters.EventMsg)
 	keys := make([]string, 0)
 	for _, e := range es {
-		if e == nil || e.Tags == nil || e.Values == nil {
+		if e == nil || e.Tags == nil || (e.Values == nil && e.Deletes == nil) {
 			continue
 		}
 		exist := true
@@ -178,7 +172,7 @@ func (p *groupBy) byTags(es []*formatters.EventMsg) []*formatters.EventMsg {
 	groups := make(map[uint64]*formatters.EventMsg)
 
 	for _, e := range es {
-		if e == nil || e.Tags == nil || e.Values == nil {
+		if e == nil || e.Tags == nil || (e.Values == nil && e.Deletes == nil) {
 			continue
 		}
 

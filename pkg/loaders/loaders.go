@@ -11,12 +11,12 @@ package loaders
 import (
 	"context"
 	"log"
+	"maps"
 	"reflect"
 
 	"github.com/mitchellh/mapstructure"
-	"github.com/prometheus/client_golang/prometheus"
-
 	"github.com/openconfig/gnmic/pkg/api/types"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // TargetLoader discovers a set of target configurations for gNMIc to run RPCs against.
@@ -80,9 +80,7 @@ func Diff(currentMap, newMap map[string]*types.TargetConfig) *TargetOperation {
 	}
 	// handle removed and added targets
 	if len(currentMap) == 0 {
-		for n, t := range newMap {
-			result.Add[n] = t
-		}
+		maps.Copy(result.Add, newMap)
 		return result
 	}
 	if len(newMap) == 0 {

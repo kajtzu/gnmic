@@ -16,14 +16,14 @@ on:
       - "main"
       - "!releases/**"
 env:
-  GOVER: 1.23.10
+  GOVER: 1.24.7
 
 jobs:
   test:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GOVER }}
       - run: ./tests/run_tests.sh
