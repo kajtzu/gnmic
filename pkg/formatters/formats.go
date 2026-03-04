@@ -10,7 +10,6 @@ package formatters
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"time"
@@ -20,15 +19,19 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/openconfig/gnmi/proto/gnmi"
+	"github.com/openconfig/gnmic/pkg/utils"
 )
 
 type MarshalOptions struct {
-	Multiline        bool
-	Indent           string
-	Format           string
-	OverrideTS       bool
-	ValuesOnly       bool
-	CalculateLatency bool
+	Multiline            bool
+	Indent               string
+	Format               string
+	OverrideTS           bool
+	ValuesOnly           bool
+	CalculateLatency     bool
+	RegisteredExtensions utils.RegisteredExtensions
+	ProtoFiles           []string
+	ProtoDir             []string
 }
 
 // Marshal //
@@ -62,9 +65,9 @@ func (o *MarshalOptions) Marshal(msg proto.Message, meta map[string]string, eps 
 					return nil, nil
 				}
 				if o.Multiline {
-					b, err = json.MarshalIndent(events, "", o.Indent)
+					b, err = jsonMarshalIndent(events, "", o.Indent)
 				} else {
-					b, err = json.Marshal(events)
+					b, err = jsonMarshal(events)
 				}
 				if err != nil {
 					return nil, fmt.Errorf("failed marshaling format 'event': %v", err)
@@ -78,9 +81,9 @@ func (o *MarshalOptions) Marshal(msg proto.Message, meta map[string]string, eps 
 			}
 
 			if o.Multiline {
-				b, err = json.MarshalIndent(events, "", o.Indent)
+				b, err = jsonMarshalIndent(events, "", o.Indent)
 			} else {
-				b, err = json.Marshal(events)
+				b, err = jsonMarshal(events)
 			}
 			if err != nil {
 				return nil, fmt.Errorf("failed marshaling format 'event': %v", err)

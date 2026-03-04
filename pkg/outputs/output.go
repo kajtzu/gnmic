@@ -1,8 +1,16 @@
 // © 2022 Nokia.
 //
-// This code is a Contribution to the gNMIc project (“Work”) made under the Google Software Grant and Corporate Contributor License Agreement (“CLA”) and governed by the Apache License 2.0.
-// No other rights or licenses in or to any of Nokia’s intellectual property are granted for any other purpose.
-// This code is provided on an “as is” basis without any warranties of any kind.
+// This code is a Contribution to the gNMIc project ("Work") made under the Google Software Grant and Corporate Contributor License Agreement ("CLA") and governed by the Apache License 2.0.
+// No other rights or licenses in or to any of Nokia's intellectual property are granted for any other purpose.
+// This code is provided on an "as is" basis without any warranties of any kind.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+// © 2025 NVIDIA Corporation
+//
+// This code is a Contribution to the gNMIc project ("Work") made under the Google Software Grant and Corporate Contributor License Agreement ("CLA") and governed by the Apache License 2.0.
+// No other rights or licenses in or to any of NVIDIA's intellectual property are granted for any other purpose.
+// This code is provided on an "as is" basis without any warranties of any kind.
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -13,25 +21,39 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
+	"sync"
 	"text/template"
 
 	"github.com/mitchellh/mapstructure"
 	"github.com/openconfig/gnmi/proto/gnmi"
-	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/openconfig/gnmic/pkg/api/utils"
 	"github.com/openconfig/gnmic/pkg/formatters"
 	_ "github.com/openconfig/gnmic/pkg/formatters/all"
+	pkgutils "github.com/openconfig/gnmic/pkg/utils"
+	"github.com/zestor-dev/zestor/store"
 )
 
 type Output interface {
+	// initialize the output
 	Init(context.Context, string, map[string]any, ...Option) error
+	// validate the config
+	Validate(map[string]any) error
+	// update the config
+	Update(context.Context, map[string]any) error
+	// update a processor
+	UpdateProcessor(string, map[string]any) error
+	// write a protobuf message to the output
 	Write(context.Context, proto.Message, Meta)
+	// write an event message to the output
 	WriteEvent(context.Context, *formatters.EventMsg)
+	// close the output
 	Close() error
+	// return a string representation of the output
 	String() string
 }
 
@@ -44,9 +66,9 @@ var OutputTypes = map[string]struct{}{
 	"influxdb":         {},
 	"kafka":            {},
 	"nats":             {},
+	"otlp":             {},
 	"prometheus":       {},
 	"prometheus_write": {},
-	"stan":             {},
 	"tcp":              {},
 	"udp":              {},
 	"gnmi":             {},
@@ -59,9 +81,21 @@ func Register(name string, initFn Initializer) {
 	Outputs[name] = initFn
 }
 
+var bytesBufferPool = sync.Pool{
+	New: func() any {
+		return new(bytes.Buffer)
+	},
+}
+
+var stringBuilderPool = sync.Pool{
+	New: func() any {
+		return new(strings.Builder)
+	},
+}
+
 type Meta map[string]string
 
-func DecodeConfig(src, dst interface{}) error {
+func DecodeConfig(src, dst any) error {
 	decoder, err := mapstructure.NewDecoder(
 		&mapstructure.DecoderConfig{
 			DecodeHook: mapstructure.StringToTimeDurationHookFunc(),
@@ -91,7 +125,11 @@ func AddSubscriptionTarget(msg proto.Message, meta Meta, addTarget string, tpl *
 			}
 			switch addTarget {
 			case "overwrite":
-				sb := new(strings.Builder)
+				sb := stringBuilderPool.Get().(*strings.Builder)
+				defer func() {
+					sb.Reset()
+					stringBuilderPool.Put(sb)
+				}()
 				err := tpl.Execute(sb, meta)
 				if err != nil {
 					return nil, err
@@ -100,7 +138,11 @@ func AddSubscriptionTarget(msg proto.Message, meta Meta, addTarget string, tpl *
 				return trsp, nil
 			case "if-not-present":
 				if rrsp.Update.Prefix.Target == "" {
-					sb := new(strings.Builder)
+					sb := stringBuilderPool.Get().(*strings.Builder)
+					defer func() {
+						sb.Reset()
+						stringBuilderPool.Put(sb)
+					}()
 					err := tpl.Execute(sb, meta)
 					if err != nil {
 						return nil, err
@@ -120,12 +162,19 @@ func ExecTemplate(content []byte, tpl *template.Template) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal input: %v", err)
 	}
-	bf := new(bytes.Buffer)
+	bf := bytesBufferPool.Get().(*bytes.Buffer)
+	defer func() {
+		bf.Reset()
+		bytesBufferPool.Put(bf)
+	}()
 	err = tpl.Execute(bf, input)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute msg template: %v", err)
 	}
-	return bf.Bytes(), nil
+	result := bf.Bytes()
+	out := make([]byte, len(result))
+	copy(out, result)
+	return out, nil
 }
 
 var (
@@ -215,21 +264,66 @@ func (b *BaseOutput) Init(context.Context, string, map[string]any, ...Option) er
 	return nil
 }
 
-func (b *BaseOutput) Write(context.Context, proto.Message, Meta) {
+func (b *BaseOutput) Validate(map[string]any) error {
+	return nil
 }
 
-func (b *BaseOutput) WriteEvent(context.Context, *formatters.EventMsg) {
-
+func (b *BaseOutput) Update(context.Context, map[string]any) error {
+	return nil
 }
+
+func (b *BaseOutput) UpdateProcessor(string, map[string]any) error {
+	return nil
+}
+
+func (b *BaseOutput) Write(context.Context, proto.Message, Meta) {}
+
+func (b *BaseOutput) WriteEvent(context.Context, *formatters.EventMsg) {}
 
 func (b *BaseOutput) Close() error {
 	return nil
 }
 
-func (b *BaseOutput) RegisterMetrics(*prometheus.Registry) {
-
-}
-
 func (b *BaseOutput) String() string {
 	return ""
+}
+
+// update processor helper
+
+func UpdateProcessorInSlice(
+	logger *log.Logger,
+	storeObj store.Store[any],
+	eventProcessors []string,
+	currentEvps []formatters.EventProcessor,
+	processorName string,
+	pcfg map[string]any,
+) ([]formatters.EventProcessor, bool, error) {
+	tcs, ps, acts, err := pkgutils.GetConfigMaps(storeObj)
+	if err != nil {
+		return nil, false, err
+	}
+
+	for i, epName := range eventProcessors {
+		if epName == processorName {
+			ep, err := formatters.MakeProcessor(logger, processorName, pcfg, ps, tcs, acts)
+			if err != nil {
+				return nil, false, err
+			}
+
+			if i >= len(currentEvps) {
+				return nil, false, fmt.Errorf("output processors are not properly initialized")
+			}
+
+			// create new slice with updated processor
+			newEvps := make([]formatters.EventProcessor, len(currentEvps))
+			copy(newEvps, currentEvps)
+			newEvps[i] = ep
+
+			logger.Printf("updated event processor %s", processorName)
+			return newEvps, true, nil
+		}
+	}
+
+	// processor not found - return currentEvps
+	return currentEvps, false, nil
 }

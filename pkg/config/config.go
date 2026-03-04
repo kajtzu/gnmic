@@ -36,6 +36,7 @@ import (
 	"github.com/openconfig/gnmic/pkg/api/types"
 	"github.com/openconfig/gnmic/pkg/api/utils"
 	gfile "github.com/openconfig/gnmic/pkg/file"
+	"github.com/zestor-dev/zestor/store"
 )
 
 const (
@@ -56,19 +57,19 @@ type Config struct {
 
 	Targets       map[string]*types.TargetConfig       `mapstructure:"targets,omitempty" json:"targets,omitempty" yaml:"targets,omitempty"`
 	Subscriptions map[string]*types.SubscriptionConfig `mapstructure:"subscriptions,omitempty" json:"subscriptions,omitempty" yaml:"subscriptions,omitempty"`
-	Outputs       map[string]map[string]interface{}    `mapstructure:"outputs,omitempty" json:"outputs,omitempty" yaml:"outputs,omitempty"`
-	Inputs        map[string]map[string]interface{}    `mapstructure:"inputs,omitempty" json:"inputs,omitempty" yaml:"inputs,omitempty"`
-	Processors    map[string]map[string]interface{}    `mapstructure:"processors,omitempty" json:"processors,omitempty" yaml:"processors,omitempty"`
-	Clustering    *clustering                          `mapstructure:"clustering,omitempty" json:"clustering,omitempty" yaml:"clustering,omitempty"`
-	GnmiServer    *gnmiServer                          `mapstructure:"gnmi-server,omitempty" json:"gnmi-server,omitempty" yaml:"gnmi-server,omitempty"`
+	Outputs       map[string]map[string]any            `mapstructure:"outputs,omitempty" json:"outputs,omitempty" yaml:"outputs,omitempty"`
+	Inputs        map[string]map[string]any            `mapstructure:"inputs,omitempty" json:"inputs,omitempty" yaml:"inputs,omitempty"`
+	Processors    map[string]map[string]any            `mapstructure:"processors,omitempty" json:"processors,omitempty" yaml:"processors,omitempty"`
+	Clustering    *Clustering                          `mapstructure:"clustering,omitempty" json:"clustering,omitempty" yaml:"clustering,omitempty"`
+	GnmiServer    *GNMIServer                          `mapstructure:"gnmi-server,omitempty" json:"gnmi-server,omitempty" yaml:"gnmi-server,omitempty"`
 	APIServer     *APIServer                           `mapstructure:"api-server,omitempty" json:"api-server,omitempty" yaml:"api-server,omitempty"`
-	Loader        map[string]interface{}               `mapstructure:"loader,omitempty" json:"loader,omitempty" yaml:"loader,omitempty"`
-	Actions       map[string]map[string]interface{}    `mapstructure:"actions,omitempty" json:"actions,omitempty" yaml:"actions,omitempty"`
-	TunnelServer  *tunnelServer                        `mapstructure:"tunnel-server,omitempty" json:"tunnel-server,omitempty" yaml:"tunnel-server,omitempty"`
+	Loader        map[string]any                       `mapstructure:"loader,omitempty" json:"loader,omitempty" yaml:"loader,omitempty"`
+	Actions       map[string]map[string]any            `mapstructure:"actions,omitempty" json:"actions,omitempty" yaml:"actions,omitempty"`
+	TunnelServer  *TunnelServer                        `mapstructure:"tunnel-server,omitempty" json:"tunnel-server,omitempty" yaml:"tunnel-server,omitempty"`
 	//
 	logger             *log.Logger
 	setRequestTemplate []*template.Template
-	setRequestVars     map[string]interface{}
+	setRequestVars     map[string]any
 }
 
 var ValueTypes = []string{"json", "json_ietf", "string", "int", "uint", "bool", "decimal", "float", "bytes", "ascii"}
@@ -104,23 +105,25 @@ type GlobalFlags struct {
 	LogCompress   bool          `mapstructure:"log-compress,omitempty" json:"log-compress,omitempty" yaml:"log-compress,omitempty"`
 	MaxMsgSize    int           `mapstructure:"max-msg-size,omitempty" json:"max-msg-size,omitempty" yaml:"max-msg-size,omitempty"`
 	//PrometheusAddress string        `mapstructure:"prometheus-address,omitempty" json:"prometheus-address,omitempty" yaml:"prometheus-address,omitempty"`
-	PrintRequest     bool          `mapstructure:"print-request,omitempty" json:"print-request,omitempty" yaml:"print-request,omitempty"`
-	Retry            time.Duration `mapstructure:"retry,omitempty" json:"retry,omitempty" yaml:"retry,omitempty"`
-	TargetBufferSize uint          `mapstructure:"target-buffer-size,omitempty" json:"target-buffer-size,omitempty" yaml:"target-buffer-size,omitempty"`
-	ClusterName      string        `mapstructure:"cluster-name,omitempty" json:"cluster-name,omitempty" yaml:"cluster-name,omitempty"`
-	InstanceName     string        `mapstructure:"instance-name,omitempty" json:"instance-name,omitempty" yaml:"instance-name,omitempty"`
-	API              string        `mapstructure:"api,omitempty" json:"api,omitempty" yaml:"api,omitempty"`
-	ProtoFile        []string      `mapstructure:"proto-file,omitempty" json:"proto-file,omitempty" yaml:"proto-file,omitempty"`
-	ProtoDir         []string      `mapstructure:"proto-dir,omitempty" json:"proto-dir,omitempty" yaml:"proto-dir,omitempty"`
-	TargetsFile      string        `mapstructure:"targets-file,omitempty" json:"targets-file,omitempty" yaml:"targets-file,omitempty"`
-	Gzip             bool          `mapstructure:"gzip,omitempty" json:"gzip,omitempty" yaml:"gzip,omitempty"`
-	File             []string      `mapstructure:"file,omitempty" json:"file,omitempty" yaml:"file,omitempty"`
-	Dir              []string      `mapstructure:"dir,omitempty" json:"dir,omitempty" yaml:"dir,omitempty"`
-	Exclude          []string      `mapstructure:"exclude,omitempty" json:"exclude,omitempty" yaml:"exclude,omitempty"`
-	Token            string        `mapstructure:"token,omitempty" json:"token,omitempty" yaml:"token,omitempty"`
-	UseTunnelServer  bool          `mapstructure:"use-tunnel-server,omitempty" json:"use-tunnel-server,omitempty" yaml:"use-tunnel-server,omitempty"`
-	AuthScheme       string        `mapstructure:"auth-scheme,omitempty" json:"auth-scheme,omitempty" yaml:"auth-scheme,omitempty"`
-	CalculateLatency bool          `mapstructure:"calculate-latency,omitempty" json:"calculate-latency,omitempty" yaml:"calculate-latency,omitempty"`
+	PrintRequest         bool          `mapstructure:"print-request,omitempty" json:"print-request,omitempty" yaml:"print-request,omitempty"`
+	Retry                time.Duration `mapstructure:"retry,omitempty" json:"retry,omitempty" yaml:"retry,omitempty"`
+	TargetBufferSize     uint          `mapstructure:"target-buffer-size,omitempty" json:"target-buffer-size,omitempty" yaml:"target-buffer-size,omitempty"`
+	ClusterName          string        `mapstructure:"cluster-name,omitempty" json:"cluster-name,omitempty" yaml:"cluster-name,omitempty"`
+	InstanceName         string        `mapstructure:"instance-name,omitempty" json:"instance-name,omitempty" yaml:"instance-name,omitempty"`
+	API                  string        `mapstructure:"api,omitempty" json:"api,omitempty" yaml:"api,omitempty"`
+	ProtoFile            []string      `mapstructure:"proto-file,omitempty" json:"proto-file,omitempty" yaml:"proto-file,omitempty"`
+	ProtoDir             []string      `mapstructure:"proto-dir,omitempty" json:"proto-dir,omitempty" yaml:"proto-dir,omitempty"`
+	RegisteredExtensions []string      `mapstructure:"registered-extensions,omitempty" json:"registered-extensions,omitempty" yaml:"registered-extensions,omitempty"`
+	RequestExtensions    string        `mapstructure:"request-extensions,omitempty" json:"request-extensions,omitempty" yaml:"request-extensions,omitempty"`
+	TargetsFile          string        `mapstructure:"targets-file,omitempty" json:"targets-file,omitempty" yaml:"targets-file,omitempty"`
+	Gzip                 bool          `mapstructure:"gzip,omitempty" json:"gzip,omitempty" yaml:"gzip,omitempty"`
+	File                 []string      `mapstructure:"file,omitempty" json:"file,omitempty" yaml:"file,omitempty"`
+	Dir                  []string      `mapstructure:"dir,omitempty" json:"dir,omitempty" yaml:"dir,omitempty"`
+	Exclude              []string      `mapstructure:"exclude,omitempty" json:"exclude,omitempty" yaml:"exclude,omitempty"`
+	Token                string        `mapstructure:"token,omitempty" json:"token,omitempty" yaml:"token,omitempty"`
+	UseTunnelServer      bool          `mapstructure:"use-tunnel-server,omitempty" json:"use-tunnel-server,omitempty" yaml:"use-tunnel-server,omitempty"`
+	AuthScheme           string        `mapstructure:"auth-scheme,omitempty" json:"auth-scheme,omitempty" yaml:"auth-scheme,omitempty"`
+	CalculateLatency     bool          `mapstructure:"calculate-latency,omitempty" json:"calculate-latency,omitempty" yaml:"calculate-latency,omitempty"`
 
 	Metadata             map[string]string `mapstructure:"metadata,omitempty" json:"metadata,omitempty" yaml:"metadata,omitempty"`
 	PluginProcessorsPath string            `mapstructure:"plugin-processors-path,omitempty" yaml:"plugin-processors-path,omitempty" json:"plugin-processors-path,omitempty"`
@@ -271,6 +274,9 @@ type LocalFlags struct {
 	ProcessorInputDelimiter string   `mapstructure:"processor-input-delimiter,omitempty" yaml:"processor-input-delimiter,omitempty" json:"processor-input-delimiter,omitempty"`
 	ProcessorName           []string `mapstructure:"processor-name,omitempty" yaml:"processor-name,omitempty" json:"processor-name,omitempty"`
 	ProcessorOutput         string   `mapstructure:"processor-output,omitempty" yaml:"processor-output,omitempty" json:"processor-output,omitempty"`
+	// Tree
+	TreeFlat    bool `mapstructure:"tree-flat,omitempty" yaml:"tree-flat,omitempty" json:"tree-flat,omitempty"`
+	TreeDetails bool `mapstructure:"tree-details,omitempty" yaml:"tree-details,omitempty" json:"tree-details,omitempty"`
 }
 
 func New() *Config {
@@ -336,6 +342,102 @@ func (c *Config) Load(ctx context.Context) error {
 
 	c.mergeEnvVars()
 	return c.expandOSPathFlagValues()
+}
+
+func (c *Config) ToStore(s store.Store[any]) error {
+	targets := make(map[string]any)
+	subscriptions := make(map[string]any)
+	processors := make(map[string]any)
+	outputs := make(map[string]any)
+	inputs := make(map[string]any)
+	actions := make(map[string]any)
+	_, err := c.GetTargets()
+	if err != nil {
+		if !errors.Is(err, ErrNoTargetsFound) {
+			return err
+		}
+	}
+	// targets
+	for n, t := range c.Targets {
+		targets[n] = t
+	}
+	// subscriptions
+	for n, s := range c.Subscriptions {
+		subscriptions[n] = s
+	}
+	// processors
+	for n, p := range c.Processors {
+		processors[n] = p
+	}
+	// outputs
+	for n, o := range c.Outputs {
+		outputs[n] = o
+	}
+	// inputs
+	for n, i := range c.Inputs {
+		inputs[n] = i
+	}
+	// actions
+	for n, a := range c.Actions {
+		actions[n] = a
+	}
+	// set all
+	err = s.SetAll("targets", targets)
+	if err != nil {
+		return err
+	}
+	err = s.SetAll("subscriptions", subscriptions)
+	if err != nil {
+		return err
+	}
+	// actions
+	err = s.SetAll("actions", actions)
+	if err != nil {
+		return err
+	}
+	err = s.SetAll("processors", processors)
+	if err != nil {
+		return err
+	}
+	err = s.SetAll("outputs", outputs)
+	if err != nil {
+		return err
+	}
+	err = s.SetAll("inputs", inputs)
+	if err != nil {
+		return err
+	}
+	//
+	_, err = s.Set("global-flags", "global-flags", c.GlobalFlags)
+	if err != nil {
+		return err
+	}
+	// clustering
+	_, err = s.Set("clustering", "clustering", c.Clustering)
+	if err != nil {
+		return err
+	}
+	// gnmi server
+	_, err = s.Set("gnmi-server", "gnmi-server", c.GnmiServer)
+	if err != nil {
+		return err
+	}
+	// api server
+	_, err = s.Set("api-server", "api-server", c.APIServer)
+	if err != nil {
+		return err
+	}
+	// loader
+	_, err = s.Set("loader", "loader", c.Loader)
+	if err != nil {
+		return err
+	}
+	// tunnel server
+	_, err = s.Set("tunnel-server", "tunnel-server", c.TunnelServer)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (c *Config) SetLogger() (io.Writer, int, error) {
@@ -466,6 +568,15 @@ func (c *Config) CreateGetRequest(tc *types.TargetConfig) (*gnmi.GetRequest, err
 	if c.LocalFlags.GetDepth > 0 {
 		gnmiOpts = append(gnmiOpts, api.Extension_Depth(c.LocalFlags.GetDepth))
 	}
+
+	exts, err := c.parseAdditionalRequestExtensions()
+
+	if err != nil {
+		return nil, err
+	}
+
+	gnmiOpts = append(gnmiOpts, exts...)
+
 	return api.NewGetRequest(gnmiOpts...)
 }
 
@@ -829,6 +940,15 @@ func (c *Config) CreateSetRequest(targetName string) ([]*gnmi.SetRequest, error)
 				))
 		}
 	}
+
+	exts, err := c.parseAdditionalRequestExtensions()
+
+	if err != nil {
+		return nil, err
+	}
+
+	gnmiOpts = append(gnmiOpts, exts...)
+
 	//
 	req, err := api.NewSetRequest(gnmiOpts...)
 	return []*gnmi.SetRequest{req}, err

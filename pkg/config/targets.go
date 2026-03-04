@@ -19,6 +19,7 @@ import (
 
 	"github.com/mitchellh/mapstructure"
 	"github.com/openconfig/gnmic/pkg/api/types"
+	"github.com/zestor-dev/zestor/store"
 )
 
 const (
@@ -41,9 +42,6 @@ func (c *Config) GetTargets() (map[string]*types.TargetConfig, error) {
 				return nil, err
 			}
 			c.Targets[tc.Name] = tc
-		}
-		if c.Debug {
-			c.logger.Printf("targets: %v", c.Targets)
 		}
 		return c.Targets, nil
 	}
@@ -98,9 +96,6 @@ func (c *Config) GetTargets() (map[string]*types.TargetConfig, error) {
 		if err != nil {
 			return nil, err
 		}
-		if c.Debug {
-			c.logger.Printf("read target config: %s", tc)
-		}
 		err = expandCertPaths(tc)
 		if err != nil {
 			return nil, err
@@ -120,46 +115,34 @@ func (c *Config) GetTargets() (map[string]*types.TargetConfig, error) {
 
 	subNames := c.FileConfig.GetStringSlice("subscribe-name")
 	if len(subNames) == 0 {
-		if c.Debug {
-			c.logger.Printf("targets: %v", c.Targets)
-		}
 		return c.Targets, nil
 	}
 	for n := range c.Targets {
 		c.Targets[n].Subscriptions = subNames
 	}
-	if c.Debug {
-		c.logger.Printf("targets: %v", c.Targets)
-	}
 	return c.Targets, nil
 }
 
-func (c *Config) SetTargetConfigDefaultsExpandEnv(tc *types.TargetConfig) error {
-	er := c.SetTargetConfigDefaults(tc)
-	if er != nil {
-		return er
-	}
-	// we can also expand cert paths if needed
-	expandTargetEnv(tc)
-
-	return nil
+func (c *Config) SetTargetConfigDefaults(tc *types.TargetConfig) error {
+	return setTargetConfigDefaultsFromGlobalFlags(tc, &c.GlobalFlags, c.FileConfig.GetString("port"))
 }
 
-func (c *Config) SetTargetConfigDefaults(tc *types.TargetConfig) error {
-	defGrpcPort := c.FileConfig.GetString("port")
+func setTargetConfigDefaultsFromGlobalFlags(tc *types.TargetConfig, gflags *GlobalFlags, defaultGRPCPort string) error {
+	if gflags.Port == "" {
+		gflags.Port = defaultGRPCPort
+	}
 	if !strings.HasPrefix(tc.Address, "unix://") {
 		addrList := strings.Split(tc.Address, ",")
 		addrs := make([]string, 0, len(addrList))
 		for _, addr := range addrList {
 			addr = strings.TrimSpace(addr)
-			if !c.UseTunnelServer {
+			if !gflags.UseTunnelServer {
 				_, _, err := net.SplitHostPort(addr)
 				if err != nil {
 					if strings.Contains(err.Error(), "missing port in address") ||
 						strings.Contains(err.Error(), "too many colons in address") {
-						addr = net.JoinHostPort(addr, defGrpcPort)
+						addr = net.JoinHostPort(addr, gflags.Port)
 					} else {
-						c.logger.Printf("error parsing address '%s': %v", addr, err)
 						return fmt.Errorf("error parsing address '%s': %v", addr, err)
 					}
 				}
@@ -169,67 +152,77 @@ func (c *Config) SetTargetConfigDefaults(tc *types.TargetConfig) error {
 		tc.Address = strings.Join(addrs, ",")
 	}
 	if tc.Username == nil {
-		tc.Username = &c.Username
+		tc.Username = &gflags.Username
 	}
 	if tc.Password == nil {
-		tc.Password = &c.Password
+		tc.Password = &gflags.Password
 	}
 	if tc.Token == nil {
-		tc.Token = &c.Token
+		tc.Token = &gflags.Token
 	}
 	if tc.AuthScheme == "" {
-		tc.AuthScheme = c.AuthScheme
+		tc.AuthScheme = gflags.AuthScheme
 	}
 	if tc.Timeout == 0 {
-		tc.Timeout = c.Timeout
+		tc.Timeout = gflags.Timeout
 	}
 	if tc.Insecure == nil {
-		tc.Insecure = &c.Insecure
+		tc.Insecure = &gflags.Insecure
 	}
 	if tc.SkipVerify == nil {
-		tc.SkipVerify = &c.SkipVerify
+		tc.SkipVerify = &gflags.SkipVerify
 	}
 	if tc.Insecure != nil && !*tc.Insecure {
 		if tc.TLSCA == nil {
-			if c.TLSCa != "" {
-				tc.TLSCA = &c.TLSCa
+			if gflags.TLSCa != "" {
+				tc.TLSCA = &gflags.TLSCa
 			}
 		}
 		if tc.TLSCert == nil {
-			tc.TLSCert = &c.TLSCert
+			tc.TLSCert = &gflags.TLSCert
 		}
 		if tc.TLSKey == nil {
-			tc.TLSKey = &c.TLSKey
+			tc.TLSKey = &gflags.TLSKey
 		}
 	}
 	if tc.RetryTimer == 0 {
-		tc.RetryTimer = c.Retry
+		tc.RetryTimer = gflags.Retry
 	}
 	if tc.TLSVersion == "" {
-		tc.TLSVersion = c.TLSVersion
+		tc.TLSVersion = gflags.TLSVersion
 	}
 	if tc.TLSMinVersion == "" {
-		tc.TLSMinVersion = c.TLSMinVersion
+		tc.TLSMinVersion = gflags.TLSMinVersion
 	}
 	if tc.TLSMaxVersion == "" {
-		tc.TLSMaxVersion = c.TLSMaxVersion
+		tc.TLSMaxVersion = gflags.TLSMaxVersion
 	}
 	if tc.TLSServerName == "" {
-		tc.TLSServerName = c.TLSServerName
+		tc.TLSServerName = gflags.TLSServerName
 	}
 	if tc.LogTLSSecret == nil {
-		tc.LogTLSSecret = &c.LogTLSSecret
+		tc.LogTLSSecret = &gflags.LogTLSSecret
 	}
 	if tc.Gzip == nil {
-		tc.Gzip = &c.Gzip
+		tc.Gzip = &gflags.Gzip
 	}
 	if tc.BufferSize == 0 {
 		tc.BufferSize = defaultTargetBufferSize
 	}
-	if tc.Metadata == nil && c.Metadata != nil {
+	if tc.Metadata == nil && gflags.Metadata != nil {
 		tc.Metadata = make(map[string]string)
-		maps.Copy(tc.Metadata, c.Metadata)
+		maps.Copy(tc.Metadata, gflags.Metadata)
 	}
+	return nil
+}
+
+func (c *Config) SetTargetConfigDefaultsExpandEnv(tc *types.TargetConfig) error {
+	err := c.SetTargetConfigDefaults(tc)
+	if err != nil {
+		return err
+	}
+	expandTargetEnv(tc)
+
 	return nil
 }
 
@@ -252,21 +245,18 @@ func expandCertPaths(tc *types.TargetConfig) error {
 			if err != nil {
 				return err
 			}
-
 		}
 		if tc.TLSCert != nil && *tc.TLSCert != "" {
 			*tc.TLSCert, err = expandOSPath(*tc.TLSCert)
 			if err != nil {
 				return err
 			}
-
 		}
 		if tc.TLSKey != nil && *tc.TLSKey != "" {
 			*tc.TLSKey, err = expandOSPath(*tc.TLSKey)
 			if err != nil {
 				return err
 			}
-
 		}
 	}
 	return nil
@@ -318,7 +308,7 @@ func expandTargetEnv(tc *types.TargetConfig) {
 func (c *Config) GetDiffTargets() (*types.TargetConfig, map[string]*types.TargetConfig, error) {
 	targetsConfig, err := c.GetTargets()
 	if err != nil {
-		if err != ErrNoTargetsFound {
+		if !errors.Is(err, ErrNoTargetsFound) {
 			return nil, nil, err
 		}
 	}
@@ -352,4 +342,28 @@ func (c *Config) GetDiffTargets() (*types.TargetConfig, map[string]*types.Target
 		}
 	}
 	return refConfig, compareConfigs, nil
+}
+
+func SetTargetConfigDefaults(s store.Store[any], tc *types.TargetConfig) error {
+	gf, found, err := s.Get("global-flags", "global-flags")
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("global-flags not found")
+	}
+	gflags, ok := gf.(GlobalFlags)
+	if !ok {
+		return fmt.Errorf("global-flags is not a *GlobalFlags")
+	}
+	return setTargetConfigDefaultsFromGlobalFlags(tc, &gflags, "")
+}
+
+func SetTargetConfigDefaultsExpandEnv(s store.Store[any], tc *types.TargetConfig) error {
+	err := SetTargetConfigDefaults(s, tc)
+	if err != nil {
+		return err
+	}
+	expandTargetEnv(tc)
+	return nil
 }

@@ -19,6 +19,8 @@ import (
 	"github.com/jhump/protoreflect/dynamic"
 	"github.com/openconfig/gnmi/proto/gnmi"
 	"github.com/openconfig/gnmic/pkg/api/types"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Subscribe sends a gnmi.SubscribeRequest to the target *t, responses and error are sent to the target channels
@@ -49,7 +51,7 @@ SUBSC_NODELAY:
 		if err != nil {
 			t.errors <- &TargetError{
 				SubscriptionName: subscriptionName,
-				Err:              fmt.Errorf("failed to create a subscribe client, target='%s', retry in %d. err=%v", t.Config.Name, t.Config.RetryTimer, err),
+				Err:              fmt.Errorf("failed to create a subscribe client, target='%s', retry in %s. err=%v", t.Config.Name, t.Config.RetryTimer, err),
 			}
 			cancel()
 			goto SUBSC
@@ -66,9 +68,14 @@ SUBSC_NODELAY:
 
 	err = subscribeClient.Send(req)
 	if err != nil {
-		t.errors <- &TargetError{
+		select {
+		case t.errors <- &TargetError{
 			SubscriptionName: subscriptionName,
-			Err:              fmt.Errorf("target '%s' send error, retry in %d. err=%v", t.Config.Name, t.Config.RetryTimer, err),
+			Err:              fmt.Errorf("target '%s' send error, retry in %s. err=%v", t.Config.Name, t.Config.RetryTimer, err),
+		}:
+		case <-ctx.Done():
+			cancel()
+			return
 		}
 		cancel()
 		goto SUBSC
@@ -76,33 +83,53 @@ SUBSC_NODELAY:
 
 	switch req.GetSubscribe().GetMode() {
 	case gnmi.SubscriptionList_STREAM:
-		err = t.handleStreamSubscriptionRcv(nctx, subscribeClient, subscriptionName, subConfig)
+		err = t.handleStreamSubscriptionRcv(nctx, subscribeClient, subscriptionName, subConfig, t.subscribeResponses)
 		if err != nil {
-			t.errors <- &TargetError{
+			select {
+			case t.errors <- &TargetError{
 				SubscriptionName: subscriptionName,
 				Err:              err,
+			}:
+			case <-ctx.Done():
+				cancel()
+				return
 			}
-			t.errors <- &TargetError{
+			select {
+			case t.errors <- &TargetError{
 				SubscriptionName: subscriptionName,
 				Err:              fmt.Errorf("retrying in %s", t.Config.RetryTimer),
+			}:
+			case <-ctx.Done():
+				cancel()
+				return
 			}
 			cancel()
 			goto SUBSC
 		}
 	case gnmi.SubscriptionList_ONCE:
-		err = t.handleONCESubscriptionRcv(nctx, subscribeClient, subscriptionName, subConfig)
+		err = t.handleONCESubscriptionRcv(nctx, subscribeClient, subscriptionName, subConfig, t.subscribeResponses)
 		if err != nil {
-			t.errors <- &TargetError{
+			select {
+			case t.errors <- &TargetError{
 				SubscriptionName: subscriptionName,
 				Err:              err,
+			}:
+			case <-ctx.Done():
+				cancel()
+				return
 			}
 			if errors.Is(err, io.EOF) {
 				cancel()
 				return
 			}
-			t.errors <- &TargetError{
+			select {
+			case t.errors <- &TargetError{
 				SubscriptionName: subscriptionName,
-				Err:              fmt.Errorf("retrying in %d", t.Config.RetryTimer),
+				Err:              fmt.Errorf("retrying in %s", t.Config.RetryTimer),
+			}:
+			case <-ctx.Done():
+				cancel()
+				return
 			}
 			cancel()
 			goto SUBSC
@@ -111,17 +138,204 @@ SUBSC_NODELAY:
 		return
 	case gnmi.SubscriptionList_POLL:
 		go t.listenPolls(nctx)
-		err = t.handlePollSubscriptionRcv(nctx, subscribeClient, subscriptionName, subConfig)
+		err = t.handlePollSubscriptionRcv(nctx, subscribeClient, subscriptionName, subConfig, t.subscribeResponses)
 		if err != nil {
-			t.errors <- &TargetError{
+			select {
+			case t.errors <- &TargetError{
 				SubscriptionName: subscriptionName,
 				Err:              err,
+			}:
+			case <-ctx.Done():
+				cancel()
+				return
 			}
 			cancel()
 			goto SUBSC
 		}
 	}
 	cancel()
+}
+
+func (t *Target) SubscribeChan(ctx context.Context, req *gnmi.SubscribeRequest, subscriptionName string) (chan *SubscribeResponse, chan *TargetError) {
+	responseCh := make(chan *SubscribeResponse, 1)
+	errCh := make(chan *TargetError, 1)
+
+	go func() {
+		defer close(responseCh)
+		defer close(errCh)
+
+		firstAttempt := true
+		for {
+			// retry delay, skipped the first attempt
+			if !firstAttempt {
+				timer := time.NewTimer(t.Config.RetryTimer)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+			}
+			firstAttempt = false
+
+			// check if parent context is done
+			if ctx.Err() != nil {
+				return
+			}
+
+			// attempt subscription
+			// return true if retry is needed
+			shouldRetry := t.attemptSubscription(ctx, req, subscriptionName, responseCh, errCh)
+			if !shouldRetry {
+				return
+			}
+		}
+	}()
+
+	return responseCh, errCh
+}
+
+func (t *Target) attemptSubscription(ctx context.Context, req *gnmi.SubscribeRequest,
+	subscriptionName string, responseCh chan *SubscribeResponse, errCh chan *TargetError) bool {
+	// create child context for this attempt
+	nctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	nctx = t.appendRequestMetadata(nctx)
+
+	// create subscribe client
+	subscribeClient, err := t.Client.Subscribe(nctx, t.callOpts()...)
+	if err != nil {
+		// check if cancellation was intentional
+		if isCancellationError(err) {
+			return false
+		}
+		sendError(errCh, ctx, subscriptionName, err)
+		return true
+	}
+
+	// store subscription state and register cleanup
+	t.m.Lock()
+	if oldCancel, ok := t.subscribeCancelFn[subscriptionName]; ok {
+		oldCancel() // cancel previous attempt
+	}
+	t.SubscribeClients[subscriptionName] = subscribeClient
+	t.subscribeCancelFn[subscriptionName] = cancel
+	subConfig := t.Subscriptions[subscriptionName]
+	t.m.Unlock()
+
+	// cleanup on exit (registered after state is stored)
+	defer t.StopSubscription(subscriptionName)
+
+	// send initial subscribe request
+	err = subscribeClient.Send(req)
+	if err != nil {
+		sendError(errCh, ctx, subscriptionName,
+			fmt.Errorf("target '%s' send error, retry in %s: %w",
+				t.Config.Name, t.Config.RetryTimer, err))
+		return true
+	}
+
+	// handle subscription based on mode
+	switch req.GetSubscribe().GetMode() {
+	case gnmi.SubscriptionList_STREAM:
+		return t.handleSTREAMMode(nctx, ctx, subscribeClient, subscriptionName, subConfig, responseCh, errCh)
+
+	case gnmi.SubscriptionList_ONCE:
+		return t.handleONCEMode(nctx, ctx, subscribeClient, subscriptionName, subConfig, responseCh, errCh)
+
+	case gnmi.SubscriptionList_POLL:
+		return t.handlePOLLMode(nctx, ctx, subscribeClient, subscriptionName, subConfig, responseCh, errCh)
+	}
+
+	return false
+}
+
+func (t *Target) handleSTREAMMode(nctx, ctx context.Context, client gnmi.GNMI_SubscribeClient,
+	subscriptionName string, subConfig *types.SubscriptionConfig,
+	responseCh chan *SubscribeResponse, errCh chan *TargetError) bool {
+
+	err := t.handleStreamSubscriptionRcv(nctx, client, subscriptionName, subConfig, responseCh)
+	if err != nil {
+		if isCancellationError(err) {
+			return false
+		}
+
+		sendError(errCh, ctx, subscriptionName, err)
+		return true
+	}
+	return false
+}
+
+func (t *Target) handleONCEMode(nctx, ctx context.Context, client gnmi.GNMI_SubscribeClient,
+	subscriptionName string, subConfig *types.SubscriptionConfig,
+	responseCh chan *SubscribeResponse, errCh chan *TargetError) bool {
+
+	err := t.handleONCESubscriptionRcv(nctx, client, subscriptionName, subConfig, responseCh)
+	if err != nil {
+		if isCancellationError(err) {
+			return false
+		}
+
+		sendError(errCh, ctx, subscriptionName, err)
+
+		// ONCE mode doesn't retry on EOF
+		if errors.Is(err, io.EOF) {
+			return false
+		}
+
+		return true
+	}
+	return false
+}
+
+func (t *Target) handlePOLLMode(nctx, ctx context.Context, client gnmi.GNMI_SubscribeClient,
+	subscriptionName string, subConfig *types.SubscriptionConfig,
+	responseCh chan *SubscribeResponse, errCh chan *TargetError) bool {
+
+	// Start poll listener once per target (not per subscription attempt)
+	// This prevents goroutine leaks on retry
+	t.m.Lock()
+	if t.pollChan == nil {
+		t.pollChan = make(chan string, 10)
+		go t.listenPolls(ctx) // Use parent context, not nctx
+	}
+	t.m.Unlock()
+
+	err := t.handlePollSubscriptionRcv(nctx, client, subscriptionName, subConfig, responseCh)
+	if err != nil {
+		if isCancellationError(err) {
+			return false
+		}
+
+		sendError(errCh, ctx, subscriptionName, err)
+		// sendError(errCh, ctx, subscriptionName,
+		// 	fmt.Errorf("retrying in %s", t.Config.RetryTimer))
+		return true
+	}
+	return false
+}
+
+// check if error is due to intentional cancellation
+func isCancellationError(err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	st, ok := status.FromError(err)
+	return ok && st.Code() == codes.Canceled
+}
+
+// send error to channel with context awareness
+func sendError(errCh chan *TargetError, ctx context.Context, subscriptionName string, err error) bool {
+	select {
+	case errCh <- &TargetError{
+		SubscriptionName: subscriptionName,
+		Err:              err,
+	}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (t *Target) SubscribeStreamChan(ctx context.Context, req *gnmi.SubscribeRequest, subscriptionName string) (chan *gnmi.SubscribeResponse, chan error) {
@@ -160,7 +374,7 @@ func (t *Target) SubscribeStreamChan(ctx context.Context, req *gnmi.SubscribeReq
 			nctx = t.appendRequestMetadata(nctx)
 			subscribeClient, err = t.Client.Subscribe(nctx, t.callOpts()...)
 			if err != nil {
-				errCh <- fmt.Errorf("failed to create a subscribe client, target='%s', retry in %d. err=%v", t.Config.Name, t.Config.RetryTimer, err)
+				errCh <- fmt.Errorf("failed to create a subscribe client, target='%s', retry in %s. err=%v", t.Config.Name, t.Config.RetryTimer, err)
 				cancel()
 				goto SUBSC
 			}
@@ -175,14 +389,14 @@ func (t *Target) SubscribeStreamChan(ctx context.Context, req *gnmi.SubscribeReq
 
 		err = subscribeClient.Send(req)
 		if err != nil {
-			errCh <- fmt.Errorf("target '%s' send error, retry in %d. err=%v", t.Config.Name, t.Config.RetryTimer, err)
+			errCh <- fmt.Errorf("target '%s' send error, retry in %s. err=%v", t.Config.Name, t.Config.RetryTimer, err)
 			cancel()
 			goto SUBSC
 		}
 
 		for {
 			if ctx.Err() != nil {
-				errCh <- err
+				errCh <- ctx.Err()
 				cancel()
 				goto SUBSC
 			}
@@ -272,6 +486,8 @@ func (t *Target) ReadSubscriptions() (chan *SubscribeResponse, chan *TargetError
 
 func (t *Target) NumberOfOnceSubscriptions() int {
 	num := 0
+	t.m.Lock()
+	defer t.m.Unlock()
 	for _, sub := range t.Subscriptions {
 		if strings.ToUpper(sub.Mode) == "ONCE" {
 			num++
@@ -308,7 +524,9 @@ func (t *Target) DecodeProtoBytes(resp *gnmi.SubscribeResponse) error {
 func (t *Target) DeleteSubscription(name string) {
 	t.m.Lock()
 	defer t.m.Unlock()
-	t.subscribeCancelFn[name]()
+	if _, ok := t.subscribeCancelFn[name]; ok {
+		t.subscribeCancelFn[name]()
+	}
 	delete(t.subscribeCancelFn, name)
 	delete(t.SubscribeClients, name)
 	delete(t.Subscriptions, name)
@@ -342,7 +560,7 @@ func (t *Target) listenPolls(ctx context.Context) {
 	}
 }
 
-func (t *Target) handleStreamSubscriptionRcv(ctx context.Context, stream gnmi.GNMI_SubscribeClient, subscriptionName string, subConfig *types.SubscriptionConfig) error {
+func (t *Target) handleStreamSubscriptionRcv(ctx context.Context, stream gnmi.GNMI_SubscribeClient, subscriptionName string, subConfig *types.SubscriptionConfig, ch chan *SubscribeResponse) error {
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -351,15 +569,19 @@ func (t *Target) handleStreamSubscriptionRcv(ctx context.Context, stream gnmi.GN
 		if err != nil {
 			return err
 		}
-		t.subscribeResponses <- &SubscribeResponse{
+		select {
+		case ch <- &SubscribeResponse{
 			SubscriptionName:   subscriptionName,
 			SubscriptionConfig: subConfig,
 			Response:           response,
+		}:
+		case <-ctx.Done():
+			return nil
 		}
 	}
 }
 
-func (t *Target) handleONCESubscriptionRcv(ctx context.Context, stream gnmi.GNMI_SubscribeClient, subscriptionName string, subConfig *types.SubscriptionConfig) error {
+func (t *Target) handleONCESubscriptionRcv(ctx context.Context, stream gnmi.GNMI_SubscribeClient, subscriptionName string, subConfig *types.SubscriptionConfig, ch chan *SubscribeResponse) error {
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -368,11 +590,15 @@ func (t *Target) handleONCESubscriptionRcv(ctx context.Context, stream gnmi.GNMI
 		if err != nil {
 			return err
 		}
-		t.subscribeResponses <- &SubscribeResponse{
+		select {
+		case <-ctx.Done():
+		case ch <- &SubscribeResponse{
 			SubscriptionName:   subscriptionName,
 			SubscriptionConfig: subConfig,
 			Response:           response,
+		}:
 		}
+
 		switch response.Response.(type) {
 		case *gnmi.SubscribeResponse_SyncResponse:
 			return nil
@@ -380,7 +606,7 @@ func (t *Target) handleONCESubscriptionRcv(ctx context.Context, stream gnmi.GNMI
 	}
 }
 
-func (t *Target) handlePollSubscriptionRcv(ctx context.Context, stream gnmi.GNMI_SubscribeClient, subscriptionName string, subConfig *types.SubscriptionConfig) error {
+func (t *Target) handlePollSubscriptionRcv(ctx context.Context, stream gnmi.GNMI_SubscribeClient, subscriptionName string, subConfig *types.SubscriptionConfig, ch chan *SubscribeResponse) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -390,10 +616,14 @@ func (t *Target) handlePollSubscriptionRcv(ctx context.Context, stream gnmi.GNMI
 			if err != nil {
 				return err
 			}
-			t.subscribeResponses <- &SubscribeResponse{
+			select {
+			case <-ctx.Done():
+				return nil
+			case ch <- &SubscribeResponse{
 				SubscriptionName:   subscriptionName,
 				SubscriptionConfig: subConfig,
 				Response:           response,
+			}:
 			}
 		}
 	}
